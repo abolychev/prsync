@@ -1,0 +1,113 @@
+#!/usr/bin/env perl
+
+use strict;
+use Parallel::ForkManager;
+use Data::Dumper;
+use Getopt::Long;
+
+my $max_procs = 10;
+my $src = '';
+my $dst = '';
+my $log = '';
+
+GetOptions(
+  'max_procs=i' => \$max_procs,
+  'src=s' => \$src,
+  'dst=s' => \$dst,
+  'log=s' => \$log
+) or die;
+
+die('Usage: prsync [--max_procs N] [--log path] --src path --dst path [-- --any_rsync_args]') unless( $src ne '' and $dst ne '');
+
+my %Log=();
+my $fh;
+
+if( $log ne'') 
+{
+  if( open($fh, $log) )
+  {
+    while(my $line = <$fh>)
+    {
+      chomp $line;
+      $Log{$line} = 1;
+    }
+    close $fh;
+  }
+  open($fh, '>>', $log) or die;
+}
+
+my ($source, $destination) = ($src, $dst); #@ARGV;
+$source =~ s|/$||;
+$destination =~ s|/$||;
+print "$source\n";
+print "$destination\n";
+my $local = $source =~ /:/ ? $destination : $source;
+
+my $pm = Parallel::ForkManager->new($max_procs);
+
+sub rsync {
+	my $dir = shift;
+  my $pid = $pm->start($dir) and return;
+ 
+  #print "rsync started for $local$dir \n";
+  # This code is the child process
+  #$dir =~ s|/$||;
+
+  my $src = $source . $dir;
+  my $dst = $destination . $dir;
+  #$src =~ s|\\|\\\\|g;
+  #$dst =~ s|\\|\\\\|g;
+  #src =~ s|"|\\"|g;
+  #$dst =~ s|"|\\"|g;
+ 
+
+  #`rsync -v -a --no-r --dirs --numeric-ids --bwlimit=500 "$src" "$dst" `;
+  unless($Log{$dir}) {
+    system 'rsync', @ARGV, qw(-a --no-r --dirs --numeric-ids), $src, $dst;
+  } else {
+    print "skip $local$dir\n";
+  }
+  #sleep 2;
+  $pm->finish(0); # pass an exit code to finish	
+}
+
+ 
+
+ 
+# Setup a callback for when a child finishes up so we can
+# get it's exit code
+$pm->run_on_finish( sub 
+{
+  my ($pid, $exit_code, $dir) = @_;
+    print "rsync finished for $local$dir \n";
+    print $fh $dir . "\n" if $log ne '' and not exists $Log{$dir};
+    $dir =~ s|/$||;
+
+    opendir(my $dh, "$local$dir") || die "can't opendir $dir: $!";
+    my @dirs = grep { (! /^\./) && -d "$local$dir/$_" && (! -l "$local$dir/$_") } readdir($dh);
+    closedir $dh;
+    #print Dumper \@dirs;
+    for my $d ( @dirs ) {
+    	rsync("$dir/$d/");
+    }
+});
+ 
+$pm->run_on_start( sub {
+    my ($pid,$ident)=@_;
+    #print "** $ident started, pid: $pid\n";
+});
+ 
+$pm->run_on_wait( sub {
+    #print "** Have to wait for one children ...\n"
+  },
+  0.5
+);
+
+
+#start rsync
+rsync('/');
+
+ 
+print "Waiting for Children...\n";
+$pm->wait_all_children;
+print "Everybody is out of the pool!\n";
